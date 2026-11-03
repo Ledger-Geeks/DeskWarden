@@ -1,117 +1,130 @@
 # DeskWarden
 
-Ultra-premium SaaS landing page and interactive product preview for an AI agent governance platform.
+**Let AI agents work on your files, under your rules.**
 
-DeskWarden presents a control layer for AI agent workflows: secure tool access, policy enforcement, human approvals, audit logs, observability, risk scoring, and evaluation scorecards.
+DeskWarden is a policy gateway that sits between an AI agent and your computer. Every tool call the agent makes is checked against your rules before anything happens. Risky actions wait for your approval, and every step goes into an append-only audit log.
 
-[Live demo](https://danieloza.github.io/deskwarden/)
+![DeskWarden](docs/preview.png)
 
-![DeskWarden preview](docs/preview.png)
+## Features
 
-## Highlights
+- **Tool rules.** Set each tool to allow, ask first, or block. Tools without a rule are denied.
+- **Folder rules.** Mark folders read-only, ask first, or off-limits. When a tool rule and a folder rule disagree, the stricter one wins.
+- **Human approval.** Held calls wait in a queue until you approve, reject, or escalate them. After 10 minutes they are rejected automatically.
+- **Audit log.** Every request, decision, and rule change is recorded. Database triggers block updates and deletes.
+- **DeskAgent.** A built-in agent powered by the OpenAI Responses API. Give it a mission ("tidy my Downloads") and it works through the gateway like any other agent.
+- **Bring your own agent.** Generate an agent key and send tool calls from any agent over HTTP.
+- **Accounts with email verification.** Signup sends a 6-digit code over SMTP. Passwords are hashed with scrypt, sessions use HttpOnly cookies, and repeated failed logins lock the account.
+- **Live console.** A dashboard shows the approval queue, run timeline, audit events, and per-agent stats.
 
-- Premium dark enterprise SaaS landing page
-- Embedded interactive dashboard preview
-- Sidebar-driven dashboard views for overview, agents, metrics, policies, audit, approvals, and risk
-- Working time range selector, refresh action, panel actions, and approval decisions
-- Tooltip guidance for dashboard controls
-- Responsive React + TypeScript + Tailwind implementation
+## How it works
 
-## Why It Matters
+```
+Your agent ──POST /api/tool-calls──▶ your rules ──▶ allowed | blocked | pending
+     ▲                                                          │
+     └──── GET /api/tool-calls/:id (poll) ◀── you: approve | reject | escalate
+```
 
-AI agents become operational systems once they can access tools, data, and business workflows. At that point, teams need more than a prompt interface: they need policy boundaries, human approval paths, audit logs, risk visibility, and evaluation signals.
+DeskAgent goes through the same path. When it needs to delete a file, it asks the gateway, waits for your decision, and runs the tool only if the call is allowed or approved.
 
-DeskWarden demonstrates the product surface for that control layer. It shows how agent runs can be reviewed through approvals, secure tool access, incident signals, risk scoring, and evaluation scorecards before sensitive automation is trusted in production-like workflows.
+## Quick start
 
-## Tech Stack
-
-- React
-- TypeScript
-- Vite
-- Tailwind CSS
-- lucide-react
-
-## Local Development
+You need **Node.js 24.2+**. The server uses only Node built-ins: `node:http`, `node:sqlite`, and `node:crypto`.
 
 ```bash
 npm install
-npm run dev
+cp .env.example .env.local    # add your keys (see Configuration)
+npm run server                # API on http://127.0.0.1:8787
+npm run dev                   # UI on http://localhost:5173/deskwarden/
 ```
 
-Build:
+Open `http://localhost:5173/deskwarden/signup` and:
 
-```bash
-npm run build
-```
+1. **Create an account.** If SMTP is configured, enter the code from your email.
+2. **Check your guardrails.** New accounts start with `.ssh` and `AppData` off-limits, `Downloads` read-only, reads allowed, and writes, moves, and deletes set to ask first.
+3. **Give DeskAgent a mission** in Mission control and approve its changes as they come in.
 
-## Backend
+## Configuration
 
-`server/index.ts` is a multi-account tool-call gateway. Before an agent runs a tool, it asks the gateway. The gateway checks that account's policy, holds risky calls for a human, and writes every step to an append-only audit log. It uses only Node built-ins (`node:http`, `node:sqlite`, `node:crypto`) and requires Node 24.2+.
-
-```
-Your agent ──POST /api/tool-calls (agent key)──▶ your policy ──▶ allowed | blocked | pending
-     ▲                                                                   │
-     └──GET /api/tool-calls/:id (poll)◀── you, signed in: approve | reject | escalate
-```
-
-The workflow in the app (`/signup`, then `/app`):
-
-1. **Create an account.** Passwords are hashed with scrypt; sessions are HttpOnly, SameSite=Strict cookies. Ten failed logins lock an email for 15 minutes.
-2. **Add your OpenAI key** to `.env.local` as `OPENAI_API_KEY`. Only the server reads it; it never reaches the browser or the database.
-3. **Set guardrails.** Tool rules (allow, ask first, block) decide what the agent may do; folder rules (read-only, ask first, off-limits) decide where. The stricter one wins, and tools without a rule are denied. New accounts start with `.ssh` and `AppData` off-limits and `Downloads` read-only. Every change is audited.
-4. **Run and monitor.** Give DeskAgent a mission in Mission control, or generate an agent key in Settings and send calls from your own agent. Approve held calls as they arrive.
-
-Every row (tool calls, runs, policies, audit events) belongs to one account and every query is scoped to it.
-
-| Endpoint | Auth | Purpose |
-| --- | --- | --- |
-| `POST /api/auth/signup`, `/login`, `/logout` | none | Create an account or start/end a session |
-| `POST /api/tool-calls` `{agent, tool, args}` | agent key | Submit a call for a policy decision |
-| `GET /api/tool-calls/:id` | agent key or session | Poll until `approved` / `rejected` |
-| `POST /api/tool-calls/:id/decision` `{decision}` | session | `approved`, `rejected` or `escalated` |
-| `GET /api/policies`, `PUT` / `DELETE /api/policies/:tool` | session | Read or change tool permissions |
-| `GET /api/folders`, `PUT` / `DELETE /api/folders` `{path, action?}` | session | Protect a folder: `readonly`, `approve` or `block` |
-| `POST /api/settings/agent-key` | session | Generate or rotate the agent key (shown once) |
-| `POST /api/agent-runs` `{task}`, `GET /api/agent-runs/:id` | session | Run DeskAgent and read its steps |
-| `GET /api/me`, `GET /api/dashboard?hours=168` | session | Account status; queue, audit, stats, latest run |
-
-```bash
-cp .env.example .env.local   # set OPENAI_API_KEY
-npm run server               # API on 127.0.0.1:8787
-npm run dev            # open http://localhost:5173/deskwarden/signup
-npm test               # uses a scripted model, never calls OpenAI
-```
-
-### Environment
+Put these in `.env.local`. It is git-ignored, and only the server reads it.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | to run DeskAgent | Server-side only. Never prefix it with `VITE_` |
+| `OPENAI_API_KEY` | to run DeskAgent | Server-side only. Never prefix it with `VITE_`, or it ships to the browser |
 | `OPENAI_MODEL` | no | Default `gpt-6-luna` |
-| `AGENT_ROOT` | no | The only folder DeskAgent may touch. Default: your home folder |
-| `SMTP_USER`, `SMTP_PASS` | no | When set, signup emails a 6-digit code (10 min, 5 tries, resend once a minute) and the account is created only after `POST /api/auth/verify` `{email, code}` |
-| `SMTP_HOST`, `SMTP_PORT` | no | Default `smtp.gmail.com` and `465` (implicit TLS only) |
+| `AGENT_ROOT` | no | The only folder DeskAgent may touch. Default: your home folder. **Set it to a narrow folder.** |
+| `SMTP_USER`, `SMTP_PASS` | no | Turns on email codes at signup. For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833) |
+| `SMTP_HOST`, `SMTP_PORT` | no | Default `smtp.gmail.com` and `465` (implicit TLS) |
 | `PORT`, `DB_PATH` | no | Default `8787` and `agentops.db` |
 
-### DeskAgent
+Without SMTP, signup creates the account straight away and the server logs a warning.
 
-DeskAgent calls the OpenAI Responses API with five real file tools: `list_folder`, `read_file`, `write_file`, `move_path` and `delete_path`. Each call goes through the same policy path as `POST /api/tool-calls`, so approval-gated calls wait (up to 10 minutes, then auto-reject).
+## Connect your own agent
 
-Safety rails that no rule can turn off:
+Generate a key in **Settings**, then ask the gateway before each tool call:
 
-- Paths outside `AGENT_ROOT`, the project folder and the trash are always refused.
-- Links and junctions are resolved first, so a shortcut cannot reach a protected folder. Changing a parent (deleting `~`) counts as changing every protected folder inside it.
-- `delete_path` moves things to `AGENT_ROOT/.agentops-trash`; restore by moving them back.
-- The server listens on 127.0.0.1 only.
+```bash
+curl -X POST http://127.0.0.1:8787/api/tool-calls \
+  -H "authorization: Bearer $AGENT_KEY" \
+  -d '{"agent":"MyAgent","tool":"write_file","args":{"path":"notes/todo.txt","content":"hi"}}'
+# {"id":7,"status":"pending","reason":"Needs your approval"}
 
-File names and contents DeskAgent reads are sent to OpenAI as part of the task.
+curl http://127.0.0.1:8787/api/tool-calls/7 -H "authorization: Bearer $AGENT_KEY"
+# poll until status is "approved" or "rejected"
+```
 
-The GitHub Pages build is the static landing page and demo console. Accounts and the app need the local backend.
+Agent keys can only submit and read tool calls. They cannot change rules or read the dashboard.
 
-## Project Intent
+## API
 
-This project is part of a practical AI systems portfolio focused on agent operations, governance, approvals, auditability, observability, and production-oriented control layers.
+| Endpoint | Auth | Purpose |
+| --- | --- | --- |
+| `POST /api/auth/signup` `{email, password}` | none | Create an account, or email a code when SMTP is on (`202`) |
+| `POST /api/auth/verify` `{email, code}` | none | Finish signup with the emailed code |
+| `POST /api/auth/login`, `/logout` | none | Start or end a session |
+| `POST /api/tool-calls` `{agent, tool, args}` | agent key | Submit a call for a decision |
+| `GET /api/tool-calls/:id` | agent key or session | Read a call's status |
+| `POST /api/tool-calls/:id/decision` `{decision}` | session | `approved`, `rejected` or `escalated` |
+| `GET /api/policies`, `PUT` / `DELETE /api/policies/:tool` | session | Read or change tool rules |
+| `GET /api/folders`, `PUT` / `DELETE /api/folders` `{path, action?}` | session | Read or change folder rules: `readonly`, `approve`, `block` |
+| `POST /api/settings/agent-key` | session | Generate or rotate the agent key (shown once) |
+| `POST /api/agent-runs` `{task}`, `GET /api/agent-runs/:id` | session | Run DeskAgent and read its steps |
+| `GET /api/me`, `GET /api/dashboard?hours=168` | session | Account info; queue, audit, stats, latest run |
+
+Every tool call, run, rule, and audit event belongs to one account, and every query is scoped to that account.
+
+## Safety rails
+
+No rule can turn these off:
+
+- DeskAgent cannot touch anything outside `AGENT_ROOT`.
+- DeskWarden's own folder, which holds the database that decides every approval, is always off-limits.
+- Links and junctions are resolved before rules are checked, so a shortcut cannot reach a protected folder. Changing a parent folder counts as changing every protected folder inside it.
+- `delete_path` moves files to `AGENT_ROOT/.agentops-trash` instead of deleting them. To restore a file, move it back.
+- The server listens on `127.0.0.1` only.
+
+**Privacy:** file names and contents that DeskAgent reads are sent to OpenAI as part of the task.
+
+## Development
+
+```bash
+npm test          # server tests; uses a scripted model and a fake mailer, never calls OpenAI or SMTP
+npm run build     # typecheck + production build into dist/
+```
+
+```
+server/index.ts   gateway, accounts, rules, DeskAgent loop
+server/mail.ts    minimal SMTP client for signup codes
+src/              React + Tailwind UI (landing page, console, mission control, guardrails, settings)
+```
+
+## Known limits
+
+- Runs as a single process. Login lockouts and pending signup codes are held in memory and reset on restart.
+- Session cookies have no `Secure` flag, so they work over `http://localhost`. Add it before serving over HTTPS.
+- SMTP supports implicit TLS (port 465) only. STARTTLS on port 587 is not supported.
+- A static host such as GitHub Pages can serve the landing page and demo console, but accounts and DeskAgent need the local backend.
 
 ## License
 
-MIT
+[MIT](LICENSE)
