@@ -11,6 +11,5 @@ dist/
 *.tsbuildinfo
 .DS_Store
 Thumbs.db
-
 agentops-*.png
 *.runtime-*.log
