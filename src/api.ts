@@ -24,7 +24,7 @@ export type LiveData = {
 };
 export type Account = {
   user: { id: number; email: string };
-  openai: { configured: boolean; model: string };
+  openrouter: { configured: boolean; model: string };
   /** The only folder DeskAgent may touch. */
   root: string;
   agentKey: { hint: string | null };

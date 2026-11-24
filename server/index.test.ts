@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { createApp, openDb, type OpenAi } from "./index.ts";
+import { createApp, openDb, takeAiRequest, type Llm } from "./index.ts";
 
 type Auth = { cookie?: string; bearer?: string };
 
@@ -21,7 +21,7 @@ function makeRoot(t: TestContext) {
   return root;
 }
 
-async function start(t: TestContext, options: { openai?: OpenAi; openaiKey?: string; sendOtp?: (to: string, code: string) => Promise<void> } = {}) {
+async function start(t: TestContext, options: { llm?: Llm; openrouterKey?: string; aiDailyLimit?: number; sendOtp?: (to: string, code: string) => Promise<void> } = {}) {
   const db = openDb(":memory:");
   const root = makeRoot(t);
   const server = createApp({ db, root, ...options }).listen(0);
@@ -34,7 +34,7 @@ async function start(t: TestContext, options: { openai?: OpenAi; openaiKey?: str
     if (auth.cookie) headers.cookie = auth.cookie;
     if (auth.bearer) headers.authorization = `Bearer ${auth.bearer}`;
     const res = await fetch(base + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
-    return { status: res.status, body: await res.json(), setCookie: res.headers.get("set-cookie") };
+    return { status: res.status, body: await res.json(), setCookie: res.headers.get("set-cookie"), retryAfter: res.headers.get("retry-after") };
   };
 
   // Sign up, then hand back a session cookie and a fresh agent key for that account.
@@ -67,7 +67,7 @@ test("accounts: signup, login, logout, lockout", async (t) => {
   const { session } = await account("Dana@Example.com");
   const me = await call("GET", "/api/me", session);
   assert.equal(me.body.user.email, "dana@example.com", "emails are normalized");
-  assert.equal(me.body.openai.configured, false);
+  assert.equal(me.body.openrouter.configured, false);
   assert.match((await call("POST", "/api/auth/signup", {}, { email: "dana@example.com", password: "another password" })).body.error, /already exists/);
 
   const signupCookie = (await call("POST", "/api/auth/login", {}, { email: "dana@example.com", password: "correct horse battery" })).setCookie!;
@@ -197,21 +197,23 @@ test("folder rules: read-only, off-limits, approval, and no way around them", as
   assert.ok(!afterDelete.some((f: { label: string }) => f.label === ".ssh"));
 });
 
-test("the desk agent uses the env OpenAI key and only touches files the rules allow", async (t) => {
+test("the desk agent uses the env OpenRouter key and only touches files the rules allow", async (t) => {
   const usedKeys: string[] = [];
+  const fn = (id: string, name: string, args: string) => ({ id, type: "function" as const, function: { name, arguments: args } });
   const turns = [
     {
-      id: "resp_1",
-      output: [
-        { type: "function_call", call_id: "c1", name: "list_folder", arguments: '{"path":"Downloads"}' },
-        { type: "function_call", call_id: "c2", name: "delete_path", arguments: '{"path":"Downloads/setup.exe"}' },
-        { type: "function_call", call_id: "c3", name: "write_file", arguments: '{"path":"notes/todo.txt","content":"buy milk"}' },
-        { type: "function_call", call_id: "c4", name: "delete_path", arguments: '{"path":"notes/old.txt"}' },
+      role: "assistant",
+      content: null,
+      tool_calls: [
+        fn("c1", "list_folder", '{"path":"Downloads"}'),
+        fn("c2", "delete_path", '{"path":"Downloads/setup.exe"}'),
+        fn("c3", "write_file", '{"path":"notes/todo.txt","content":"buy milk"}'),
+        fn("c4", "delete_path", '{"path":"notes/old.txt"}'),
       ],
     },
-    { id: "resp_2", output: [{ type: "message", content: [{ type: "output_text", text: "Downloads is protected, so I left it. Wrote the todo." }] }] },
+    { role: "assistant", content: "Downloads is protected, so I left it. Wrote the todo." },
   ];
-  const openai: OpenAi = {
+  const llm: Llm = {
     respond: (key) => {
       usedKeys.push(key);
       return async () => turns.shift()!;
@@ -222,9 +224,9 @@ test("the desk agent uses the env OpenAI key and only touches files the rules al
   const nobody = await offline.account("omar@example.com");
   assert.equal((await offline.call("POST", "/api/agent-runs", nobody.session, { task: "Tidy up" })).status, 409, "no key, no agent");
 
-  const { root, call, account } = await start(t, { openai, openaiKey: "sk-env-key" });
+  const { root, call, account } = await start(t, { llm, openrouterKey: "sk-or-env-key" });
   const { session } = await account("dana@example.com");
-  assert.deepEqual((await call("GET", "/api/me", session)).body.openai, { configured: true, model: "gpt-6-luna" });
+  assert.deepEqual((await call("GET", "/api/me", session)).body.openrouter, { configured: true, model: "openai/gpt-6-luna" });
 
   const { body: run } = await call("POST", "/api/agent-runs", session, { task: "Delete my Downloads installer and note what to buy" });
   for (let i = 0; i < 2; i++) {
@@ -236,12 +238,36 @@ test("the desk agent uses the env OpenAI key and only touches files the rules al
     return body.status !== "running" && body;
   });
   assert.equal(done.status, "completed");
+  assert.equal(done.output, "Downloads is protected, so I left it. Wrote the todo.");
   assert.deepEqual(done.steps.map((s: { status: string }) => s.status), ["allowed", "blocked", "approved", "approved"]);
   assert.ok(existsSync(join(root, "Downloads", "setup.exe")), "the protected file is untouched");
   assert.equal(readFileSync(join(root, "notes", "todo.txt"), "utf8"), "buy milk");
   assert.ok(!existsSync(join(root, "notes", "old.txt")));
   assert.match(readdirSync(join(root, ".agentops-trash"))[0], /-old\.txt$/, "deletes are recoverable from the trash");
-  assert.deepEqual(usedKeys, ["sk-env-key"]);
+  assert.deepEqual(usedKeys, ["sk-or-env-key"]);
+});
+
+test("daily AI limit: N runs per account per UTC day, then 429", async (t) => {
+  const db = openDb(":memory:");
+  db.exec("INSERT INTO users (id, email, password_hash, created_at) VALUES (1, 'a@x.co', 'x:y', ''), (2, 'b@x.co', 'x:y', '')");
+  const today = new Date("2026-03-01T22:00:00Z");
+  const take = (userId: number, at = today) => takeAiRequest(db, userId, 2, at).ok;
+  assert.deepEqual([take(1), take(1), take(1)], [true, true, false], "N allowed, N+1 refused");
+  assert.equal(take(2), true, "each account has its own count");
+  assert.equal(takeAiRequest(db, 1, 2, today).resetInSec, 2 * 3600, "resets at UTC midnight");
+  assert.equal(take(1, new Date("2026-03-02T00:00:01Z")), true, "a new UTC day starts fresh");
+
+  // Over HTTP: the refusal carries the message the UI shows, and Retry-After.
+  const llm: Llm = { respond: () => async () => ({ role: "assistant", content: "done" }) };
+  const { call, account } = await start(t, { llm, openrouterKey: "sk-or-test", aiDailyLimit: 1 });
+  const { session } = await account("dana@example.com");
+  assert.equal((await call("POST", "/api/agent-runs", session, { task: "one" })).status, 201);
+  await until(async () => (await call("GET", "/api/dashboard", session)).body.run.status === "completed");
+  const refused = await call("POST", "/api/agent-runs", session, { task: "two" });
+  assert.equal(refused.status, 429);
+  assert.match(refused.body.error, /^Daily AI limit reached \(1 per day\)\. Try again in \d+h\.$/);
+  assert.equal(refused.body.remaining, 0);
+  assert.equal(String(refused.body.resetInSec), refused.retryAfter);
 });
 
 test("accounts from before the file tools get the default rules once", (t) => {

@@ -70,7 +70,7 @@ const flow = [
 
 const workspaceSteps = [
   [UserPlus, "Create an account", "Your policies, keys, runs and audit log are private to your account."],
-  [Plug, "Add your OpenAI key", "One line in .env.local. It stays on the server and never reaches the browser."],
+  [Plug, "Add your OpenRouter key", "One line in .env.local. It stays on the server and never reaches the browser."],
   [ShieldCheck, "Protect your folders", "Mark folders read-only, ask-first or off-limits. Change it any time."],
   [CirclePlay, "Run tasks and watch", "Give the agent a task and approve its risky calls as they happen."],
 ] as const;
@@ -85,7 +85,7 @@ const defaultPolicies: LivePolicy[] = [
 ];
 
 const quickstart = [
-  ["Configure", "cp .env.example .env.local\n# then set your key:\nOPENAI_API_KEY=sk-..."],
+  ["Configure", "cp .env.example .env.local\n# then set your key:\nOPENROUTER_API_KEY=sk-or-..."],
   ["Run", "npm install\nnpm run server   # API on :8787\nnpm run dev      # open the app, create an account"],
   [
     "Connect your own agent",
@@ -107,8 +107,8 @@ const endpoints = [
 
 const faqs = [
   [
-    "Do I need an OpenAI API key?",
-    "Only to run DeskAgent. Put it in .env.local as OPENAI_API_KEY; it stays on the server. Your own agents can use the gateway with just an agent key.",
+    "Do I need an OpenRouter API key?",
+    "Only to run DeskAgent. Put it in .env.local as OPENROUTER_API_KEY; it stays on the server. Your own agents can use the gateway with just an agent key.",
   ],
   [
     "If I tell the agent \"don't delete Downloads\", is that enough?",
@@ -120,7 +120,7 @@ const faqs = [
   ],
   [
     "Where is the data stored?",
-    "In a local SQLite file (DB_PATH). Passwords are hashed with scrypt. The server listens on 127.0.0.1 only. File names and contents DeskAgent reads are sent to OpenAI as part of the task.",
+    "In a local SQLite file (DB_PATH). Passwords are hashed with scrypt. The server listens on 127.0.0.1 only. File names and contents DeskAgent reads are sent to OpenRouter and the model provider as part of the task.",
   ],
   [
     "Is the audit log tamper-proof?",
@@ -493,7 +493,7 @@ function Pricing() {
           <div className="reveal frame flex flex-col gap-8 p-8 sm:p-10" style={stagger(1)}>
             <div>
               <h3 className="text-xl font-semibold">What you pay for</h3>
-              <p className="mt-2 leading-7 text-ink/60">Only your own model usage. The demo agent calls OpenAI with the key you connect, and OpenAI bills you directly.</p>
+              <p className="mt-2 leading-7 text-ink/60">Only your own model usage. The demo agent calls OpenRouter with the key you connect, and OpenRouter bills you directly.</p>
             </div>
             <div>
               <h3 className="text-xl font-semibold">What is not included</h3>

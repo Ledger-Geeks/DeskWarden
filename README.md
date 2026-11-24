@@ -12,7 +12,7 @@ DeskWarden is a policy gateway that sits between an AI agent and your computer. 
 - **Folder rules.** Mark folders read-only, ask first, or off-limits. When a tool rule and a folder rule disagree, the stricter one wins.
 - **Human approval.** Held calls wait in a queue until you approve, reject, or escalate them. After 10 minutes they are rejected automatically.
 - **Audit log.** Every request, decision, and rule change is recorded. Database triggers block updates and deletes.
-- **DeskAgent.** A built-in agent powered by the OpenAI Responses API. Give it a mission ("tidy my Downloads") and it works through the gateway like any other agent.
+- **DeskAgent.** A built-in agent that calls models through OpenRouter's Chat Completions API, limited to 5 runs per account per UTC day by default. Give it a mission ("tidy my Downloads") and it works through the gateway like any other agent.
 - **Bring your own agent.** Generate an agent key and send tool calls from any agent over HTTP.
 - **Accounts with email verification.** Signup sends a 6-digit code over SMTP. Passwords are hashed with scrypt, sessions use HttpOnly cookies, and repeated failed logins lock the account.
 - **Live console.** A dashboard shows the approval queue, run timeline, audit events, and per-agent stats.
@@ -50,8 +50,9 @@ Put these in `.env.local`. It is git-ignored, and only the server reads it.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | to run DeskAgent | Server-side only. Never prefix it with `VITE_`, or it ships to the browser |
-| `OPENAI_MODEL` | no | Default `gpt-6-luna` |
+| `OPENROUTER_API_KEY` | to run DeskAgent | From [openrouter.ai/keys](https://openrouter.ai/keys). Server-side only. Never prefix it with `VITE_`, or it ships to the browser |
+| `OPENROUTER_MODEL` | no | An OpenRouter model id. Default `openai/gpt-6-luna` |
+| `AI_DAILY_LIMIT` | no | DeskAgent runs each account may start per UTC day. Default `5`. Over the limit, `POST /api/agent-runs` returns `429` with a `Retry-After` header |
 | `AGENT_ROOT` | no | The only folder DeskAgent may touch. Default: your home folder. **Set it to a narrow folder.** |
 | `SMTP_USER`, `SMTP_PASS` | no | Turns on email codes at signup. For Gmail, use an [App Password](https://support.google.com/accounts/answer/185833) |
 | `SMTP_HOST`, `SMTP_PORT` | no | Default `smtp.gmail.com` and `465` (implicit TLS) |
@@ -103,12 +104,12 @@ No rule can turn these off:
 - `delete_path` moves files to `AGENT_ROOT/.agentops-trash` instead of deleting them. To restore a file, move it back.
 - The server listens on `127.0.0.1` only.
 
-**Privacy:** file names and contents that DeskAgent reads are sent to OpenAI as part of the task.
+**Privacy:** file names and contents that DeskAgent reads are sent to OpenRouter, and on to the model's provider, as part of the task.
 
 ## Development
 
 ```bash
-npm test          # server tests; uses a scripted model and a fake mailer, never calls OpenAI or SMTP
+npm test          # server tests; uses a scripted model and a fake mailer, never calls OpenRouter or SMTP
 npm run build     # typecheck + production build into dist/
 ```
 

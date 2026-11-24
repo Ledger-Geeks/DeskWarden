@@ -413,7 +413,7 @@ export function AppShell({ route }: { route: string }) {
 
 function Onboarding({ account, live }: { account: Account; live: LiveData | null }) {
   const steps = [
-    ["Add your OpenAI key", account.openai.configured, appUrl("/app/settings"), Plug],
+    ["Add your OpenRouter key", account.openrouter.configured, appUrl("/app/settings"), Plug],
     // Reviewing has no state of its own; it counts as done once a run shows the rules in action.
     ["Check your guardrails", Boolean(live?.run), appUrl("/app/policies"), ShieldCheck],
     ["Give DeskAgent a mission", Boolean(live?.run), appUrl("/app/playground"), CirclePlay],
@@ -481,7 +481,7 @@ function Playground({ live, reload, root }: { live: LiveData | null; reload: () 
     "Loading your workspace..."
   ) : !live.agentEnabled ? (
     <>
-      Add OPENAI_API_KEY to .env.local and restart the server.{" "}
+      Add OPENROUTER_API_KEY to .env.local and restart the server.{" "}
       <a className="underline" href={appUrl("/app/settings")}>
         How
       </a>
@@ -521,7 +521,7 @@ function Playground({ live, reload, root }: { live: LiveData | null; reload: () 
   return (
     <>
       <PageHeading
-        eyebrow="DeskAgent / OpenAI"
+        eyebrow="DeskAgent / OpenRouter"
         title="Mission control"
         copy={
           <>
@@ -915,7 +915,7 @@ function PoliciesPage({ root }: { root: string }) {
 function SettingsPage({ account, onAccount }: { account: Account; onAccount: (account: Account) => void }) {
   const [newKey, setNewKey] = useState("");
   const [keyError, setKeyError] = useState("");
-  const configured = account.openai.configured;
+  const configured = account.openrouter.configured;
 
   async function rotate() {
     setKeyError("");
@@ -928,7 +928,7 @@ function SettingsPage({ account, onAccount }: { account: Account; onAccount: (ac
     }
   }
 
-  const envLines = "# .env.local in the project folder\nOPENAI_API_KEY=sk-...\n\n# then restart the API\nnpm run server";
+  const envLines = "# .env.local in the project folder\nOPENROUTER_API_KEY=sk-or-...\n\n# then restart the API\nnpm run server";
   const curl = `curl -X POST 127.0.0.1:8787/api/tool-calls \\\n  -H "authorization: Bearer ${newKey || "$AGENT_KEY"}" \\\n  -d '{"agent":"MyAgent","tool":"delete_path","args":{"path":"Downloads"}}'`;
 
   return (
@@ -938,7 +938,7 @@ function SettingsPage({ account, onAccount }: { account: Account; onAccount: (ac
         <section className="frame holo hud flex flex-col gap-5 p-6">
           <div className="flex items-center justify-between gap-3">
             <h2 className="flex items-center gap-3 text-lg font-semibold">
-              <IconTile icon={Plug} /> OpenAI
+              <IconTile icon={Plug} /> OpenRouter
             </h2>
             <StatusChip status={configured ? "Connected" : "Not configured"} />
           </div>
@@ -948,7 +948,7 @@ function SettingsPage({ account, onAccount }: { account: Account; onAccount: (ac
           </p>
           <dl className="grid gap-3 sm:grid-cols-2">
             {[
-              ["Model", account.openai.model],
+              ["Model", account.openrouter.model],
               ["Agent folder", account.root],
             ].map(([label, value]) => (
               <div key={label} className="rounded-xl bg-raised p-3">
@@ -966,7 +966,7 @@ function SettingsPage({ account, onAccount }: { account: Account; onAccount: (ac
               <pre className="overflow-x-auto rounded-xl bg-black p-4 font-mono text-[11.5px] leading-6 text-slate-200">{envLines}</pre>
             </div>
           )}
-          <p className="text-xs leading-5 text-ink/50">Change the model with OPENAI_MODEL and the folder with AGENT_ROOT in the same file.</p>
+          <p className="text-xs leading-5 text-ink/50">Change the model with OPENROUTER_MODEL and the folder with AGENT_ROOT in the same file.</p>
         </section>
 
         <div className="space-y-4">

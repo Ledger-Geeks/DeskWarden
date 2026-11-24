@@ -12,9 +12,11 @@ type Action = "allow" | "approve" | "block";
 type Guard = "readonly" | "approve" | "block";
 type Json = Record<string, unknown>;
 type Identity = { userId: number; email: string; role: "operator" | "agent" };
-type OutputItem = { type: string; call_id?: string; name?: string; arguments?: string; content?: Array<{ type: string; text?: string }> };
-export type Respond = (request: { input: unknown[]; previousResponseId?: string }) => Promise<{ id: string; output: OutputItem[] }>;
-export type OpenAi = { respond: (apiKey: string, model: string, instructions: string) => Respond };
+type ToolCall = { id: string; type: "function"; function: { name: string; arguments: string } };
+type Message = { role: string; content?: string | null; tool_calls?: ToolCall[]; tool_call_id?: string };
+/** One chat completion: the conversation so far in, the assistant's reply out. */
+export type Respond = (messages: Message[]) => Promise<Message>;
+export type Llm = { respond: (apiKey: string, model: string, instructions: string) => Respond };
 
 const scryptAsync = promisify(scrypt) as (password: string, salt: Buffer, keylen: number) => Promise<Buffer>;
 
@@ -54,14 +56,16 @@ const DEFAULT_GUARDS: Array<[string, Guard]> = [
 // Strict function tools: every property required, no extras (OpenAI strict-mode rules).
 const TOOLS = Object.entries(CATALOG).map(([name, { description, params }]) => ({
   type: "function",
-  name,
-  description,
-  strict: true,
-  parameters: {
-    type: "object",
-    properties: Object.fromEntries(Object.entries(params).map(([key, type]) => [key, { type }])),
-    required: Object.keys(params),
-    additionalProperties: false,
+  function: {
+    name,
+    description,
+    strict: true,
+    parameters: {
+      type: "object",
+      properties: Object.fromEntries(Object.entries(params).map(([key, type]) => [key, { type }])),
+      required: Object.keys(params),
+      additionalProperties: false,
+    },
   },
 }));
 
@@ -75,18 +79,32 @@ const instructionsFor = (root: string) =>
 
 const fail = (status: number, message: string) => Object.assign(new Error(message), { status });
 
-export const openAi: OpenAi = {
-  respond: (apiKey, model, instructions) => async ({ input, previousResponseId }) => {
-    const res = await fetch("https://api.openai.com/v1/responses", {
+// OpenRouter's OpenAI-compatible Chat Completions endpoint. It keeps no state, so every call sends the whole conversation.
+export const openRouter: Llm = {
+  respond: (apiKey, model, instructions) => async (messages) => {
+    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
       method: "POST",
       headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
-      body: JSON.stringify({ model, instructions, input, tools: TOOLS, previous_response_id: previousResponseId }),
+      body: JSON.stringify({ model, messages: [{ role: "system", content: instructions }, ...messages], tools: TOOLS }),
     });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error?.message ?? `OpenAI request failed (${res.status})`);
-    return body;
+    const body = await res.json().catch(() => ({}));
+    const message = body.choices?.[0]?.message;
+    if (!res.ok || !message) throw new Error(body.error?.message ?? `OpenRouter request failed (${res.status})`);
+    return message;
   },
 };
+
+const DAY_MS = 86_400_000;
+
+// Counts one AI request against an account's quota for the current UTC day.
+// One SQL statement, so the check and the increment cannot interleave.
+export function takeAiRequest(db: DatabaseSync, userId: number, limit: number, at = new Date()) {
+  const day = at.toISOString().slice(0, 10);
+  const row = db
+    .prepare("INSERT INTO ai_usage (user_id, day, count) VALUES (?, ?, 1) ON CONFLICT (user_id, day) DO UPDATE SET count = count + 1 WHERE count < ? RETURNING count")
+    .get(userId, day, limit);
+  return { ok: limit > 0 && row !== undefined, resetInSec: Math.ceil((DAY_MS - (at.getTime() % DAY_MS)) / 1000) };
+}
 
 // True when `child` is `parent` or inside it. path.win32.relative compares case-insensitively, matching NTFS.
 const within = (parent: string, child: string) => {
@@ -106,15 +124,6 @@ function realish(path: string) {
   }
   return join(realpathSync.native(head), ...tail);
 }
-
-const outputText = (output: OutputItem[]) =>
-  output
-    .filter((item) => item.type === "message")
-    .flatMap((item) => item.content ?? [])
-    .filter((part) => part.type === "output_text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim() || "(The model returned no text.)";
 
 export function openDb(path: string) {
   const db = new DatabaseSync(path);
@@ -163,6 +172,12 @@ export function openDb(path: string) {
       status TEXT NOT NULL,
       reason TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      day TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      PRIMARY KEY (user_id, day)
     );
     CREATE TABLE IF NOT EXISTS audit_log (
       id INTEGER PRIMARY KEY,
@@ -235,18 +250,21 @@ const isEmail = (v: unknown): v is string => typeof v === "string" && v.length <
 export function createApp({
   db,
   root: rootDir,
-  openaiKey,
-  model = "gpt-6-luna",
-  openai = openAi,
+  openrouterKey,
+  model = "openai/gpt-6-luna",
+  llm = openRouter,
+  aiDailyLimit = 5,
   approvalTimeoutMs = 10 * 60_000,
   sendOtp,
 }: {
   db: DatabaseSync;
   /** The only folder the desk agent may touch. */
   root: string;
-  openaiKey?: string;
+  openrouterKey?: string;
   model?: string;
-  openai?: OpenAi;
+  llm?: Llm;
+  /** DeskAgent runs each account may start per UTC day. */
+  aiDailyLimit?: number;
   approvalTimeoutMs?: number;
   /** Emails a signup code. Without it, signup creates the account at once (no email check). */
   sendOtp?: (to: string, code: string) => Promise<void>;
@@ -441,18 +459,19 @@ export function createApp({
     }
   }
 
-  async function useTool(userId: number, runId: number, call: OutputItem) {
+  async function useTool(userId: number, runId: number, call: ToolCall) {
+    const { name, arguments: raw } = call.function;
     let args: Json;
     try {
-      args = JSON.parse(call.arguments ?? "{}");
+      args = JSON.parse(raw || "{}");
     } catch {
       return { error: "Arguments were not valid JSON" };
     }
-    const submitted = submit(userId, AGENT_NAME, call.name ?? "", args, runId);
+    const submitted = submit(userId, AGENT_NAME, name ?? "", args, runId);
     const status = submitted.status === "pending" ? await waitForDecision(userId, submitted.id) : submitted.status;
     if (status !== "allowed" && status !== "approved") return { error: `DeskWarden ${status} this call (${submitted.reason}). Do not retry it.` };
     try {
-      return execute(call.name!, args);
+      return execute(name, args);
     } catch (error) {
       return { error: error instanceof Error ? error.message : String(error) };
     }
@@ -505,15 +524,16 @@ export function createApp({
 
   async function runAgent(userId: number, runId: number, task: string, model: Respond) {
     try {
-      let response = await model({ input: [{ role: "user", content: task }] });
+      const messages: Message[] = [{ role: "user", content: task }];
+      let reply = await model(messages);
       for (let turn = 1; turn <= MAX_TURNS; turn++) {
-        const calls = response.output.filter((item) => item.type === "function_call");
-        if (calls.length === 0) return finishRun(userId, runId, "completed", outputText(response.output));
-        const outputs = [];
+        const calls = reply.tool_calls ?? [];
+        if (calls.length === 0) return finishRun(userId, runId, "completed", reply.content?.trim() || "(The model returned no text.)");
+        messages.push({ role: "assistant", content: reply.content ?? null, tool_calls: calls });
         for (const call of calls) {
-          outputs.push({ type: "function_call_output", call_id: call.call_id, output: JSON.stringify(await useTool(userId, runId, call)) });
+          messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify(await useTool(userId, runId, call)) });
         }
-        response = await model({ input: outputs, previousResponseId: response.id });
+        reply = await model(messages);
       }
       finishRun(userId, runId, "failed", `Stopped after ${MAX_TURNS} model turns`);
     } catch (error) {
@@ -531,7 +551,7 @@ export function createApp({
     const user = q.userById.get(userId) as Json;
     return {
       user: { id: user.id, email: user.email },
-      openai: { configured: Boolean(openaiKey), model },
+      openrouter: { configured: Boolean(openrouterKey), model },
       root,
       agentKey: { hint: user.agent_key_hint ?? null },
     };
@@ -702,18 +722,28 @@ export function createApp({
     }
 
     if (req.method === "POST" && path === "/api/agent-runs") {
-      if (!openaiKey) throw fail(409, "Add OPENAI_API_KEY to .env.local and restart the server");
+      if (!openrouterKey) throw fail(409, "Add OPENROUTER_API_KEY to .env.local and restart the server");
       const { task } = await readJson(req);
       if (typeof task !== "string" || !task.trim() || task.length > 500) throw fail(400, "task must be 1-500 characters");
       // One run at a time per account keeps model spend predictable.
       if (q.activeRun.get(userId)) throw fail(409, "An agent run is already in progress");
-      const llm = openai.respond(openaiKey, model, instructionsFor(root));
+      // A run is one request against the quota, however many model turns it takes.
+      const quota = takeAiRequest(db, userId, aiDailyLimit);
+      if (!quota.ok) {
+        res.setHeader("retry-after", String(quota.resetInSec));
+        return send(res, 429, {
+          error: `Daily AI limit reached (${aiDailyLimit} per day). Try again in ${Math.ceil(quota.resetInSec / 3600)}h.`,
+          remaining: 0,
+          resetInSec: quota.resetInSec,
+        });
+      }
+      const respond = llm.respond(openrouterKey, model, instructionsFor(root));
       const id = tx(() => {
         const runId = Number(q.insertRun.run(userId, AGENT_NAME, task.trim(), now()).lastInsertRowid);
         audit(userId, AGENT_NAME, "RUN STARTED", null, task.trim());
         return runId;
       });
-      void runAgent(userId, id, task.trim(), llm);
+      void runAgent(userId, id, task.trim(), respond);
       return send(res, 201, { id });
     }
 
@@ -738,7 +768,7 @@ export function createApp({
         policies: policyList(userId),
         folders: guardList(userId),
         run: withSteps(q.latestRun.get(userId) as Json | undefined),
-        agentEnabled: Boolean(openaiKey),
+        agentEnabled: Boolean(openrouterKey),
       });
     }
 
@@ -755,9 +785,9 @@ export function createApp({
 }
 
 if (import.meta.main) {
-  const { OPENAI_API_KEY, OPENAI_MODEL, PORT = "8787", DB_PATH = "agentops.db" } = process.env;
+  const { OPENROUTER_API_KEY, OPENROUTER_MODEL, AI_DAILY_LIMIT, PORT = "8787", DB_PATH = "agentops.db" } = process.env;
   const AGENT_ROOT = process.env.AGENT_ROOT || homedir();
-  if (!OPENAI_API_KEY) console.warn("OPENAI_API_KEY is not set: the gateway works, but DeskAgent cannot run (see .env.example).");
+  if (!OPENROUTER_API_KEY) console.warn("OPENROUTER_API_KEY is not set: the gateway works, but DeskAgent cannot run (see .env.example).");
   const { SMTP_USER, SMTP_PASS, SMTP_HOST = "smtp.gmail.com", SMTP_PORT = "465" } = process.env;
   const smtp = SMTP_USER && SMTP_PASS ? { host: SMTP_HOST, port: Number(SMTP_PORT), user: SMTP_USER, pass: SMTP_PASS } : null;
   if (!smtp) console.warn("SMTP_USER / SMTP_PASS are not set: signup creates accounts without an email code (see .env.example).");
@@ -765,7 +795,15 @@ if (import.meta.main) {
     ? (to: string, code: string) =>
         sendMail(smtp, to, `${code} is your DeskWarden code`, `Your DeskWarden verification code is ${code}.\r\nIt expires in 10 minutes. If you did not sign up, ignore this email.`)
     : undefined;
-  const app = createApp({ db: openDb(DB_PATH), root: AGENT_ROOT, openaiKey: OPENAI_API_KEY, model: OPENAI_MODEL || undefined, sendOtp });
+  const app = createApp({
+    db: openDb(DB_PATH),
+    root: AGENT_ROOT,
+    openrouterKey: OPENROUTER_API_KEY,
+    model: OPENROUTER_MODEL || undefined,
+    // Empty, 0 or not a number falls back to the default of 5.
+    aiDailyLimit: Number(AI_DAILY_LIMIT) || undefined,
+    sendOtp,
+  });
   // Loopback only: this server can change files on this computer, so nothing else on the network may reach it.
   app.listen(Number(PORT), "127.0.0.1", () => console.log(`DeskWarden API on http://127.0.0.1:${PORT}, agent folder ${AGENT_ROOT}`));
 }
